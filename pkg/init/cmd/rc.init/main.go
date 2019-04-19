@@ -40,6 +40,7 @@ func subreaper() {
 
 // nothing really to error to, so just warn
 func mount(source string, target string, fstype string, flags uintptr, data string) {
+	mkdir(target, 0755)
 	err := unix.Mount(source, target, fstype, flags, data)
 	if err != nil {
 		log.Printf("error mounting %s to %s: %v", source, target, err)
@@ -66,10 +67,7 @@ func mkchar(path string, mode, major, minor uint32) {
 
 // symlink with error warning
 func symlink(oldpath string, newpath string) {
-	err := unix.Symlink(oldpath, newpath)
-	if err != nil {
-		log.Printf("error making symlink %s: %v", newpath, err)
-	}
+	unix.Symlink(oldpath, newpath)
 }
 
 // mkdirall with warning
@@ -165,27 +163,28 @@ func modalias(path string) {
 
 func doMounts() {
 	// mount proc filesystem
-	mount("proc", "/proc", "proc", nodev|nosuid|noexec|relatime, "")
+	mountSilent("proc", "/proc", "proc", nodev|nosuid|noexec|relatime, "")
 
 	// remount rootfs read only if it is not already
-	mountSilent("", "/", "", remount|readonly, "")
+	//mountSilent("", "/", "", remount|readonly, "")
 
 	// mount tmpfs for /tmp and /run
 	mount("tmpfs", "/run", "tmpfs", nodev|nosuid|noexec|relatime, "size=10%,mode=755")
 	mount("tmpfs", "/tmp", "tmpfs", nodev|nosuid|noexec|relatime, "size=10%,mode=1777")
 
 	// mount tmpfs for /var. This may be overmounted with a persistent filesystem later
-	mount("tmpfs", "/var", "tmpfs", nodev|nosuid|noexec|relatime, "size=50%,mode=755")
+	//mount("tmpfs", "/var", "tmpfs", nodev|nosuid|noexec|relatime, "size=50%,mode=755")
 	// add standard directories in /var
 	mkdir("/var/cache", 0755)
 	mkdir("/var/empty", 0555)
 	mkdir("/var/lib", 0755)
-	mkdir("/var/local", 0755)
+	mkdir("/var/local/bin", 0755)
 	mkdir("/var/lock", 0755)
 	mkdir("/var/log", 0755)
 	mkdir("/var/opt", 0755)
 	mkdir("/var/spool", 0755)
 	mkdir("/var/tmp", 01777)
+	mkdir("/home", 0755)
 	symlink("/run", "/var/run")
 
 	// mount devfs
@@ -246,7 +245,7 @@ func doMounts() {
 }
 
 func doHotplug() {
-	mdev := "/sbin/mdev"
+	mdev := "/usr/sbin/mdev"
 	// start mdev for hotplug
 	write("/proc/sys/kernel/hotplug", mdev)
 
@@ -340,38 +339,6 @@ func doLoopback() {
 }
 
 // execute scripts in /etc/init.d/ or /etc/shutdown.d. These should not block.
-func runInit(path string) {
-	for _, f := range readdir(path) {
-		file := filepath.Join(path, f)
-		fi, err := os.Stat(file)
-		if err != nil {
-			log.Printf("Cannot stat %s: %v", file, err)
-			continue
-		}
-		if !fi.Mode().IsRegular() {
-			continue
-		}
-		cmd := exec.Command(file)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		_ = cmd.Run()
-	}
-}
-
-func doReap() {
-	// now reap all children
-	// if we are running in a real system, init does this, but in a container it would terminate when we exit
-	for {
-		_, err := unix.Wait4(-1, nil, 0, nil)
-		if err != nil {
-			// ECHILD means no children left
-			if e, ok := err.(*os.SyscallError); ok && e.Err == unix.ECHILD {
-				return
-			}
-		}
-	}
-}
-
 func unmountAll() {
 	mounts, err := os.Open("/proc/mounts")
 	if err != nil {
@@ -403,7 +370,6 @@ func unmountAll() {
 }
 
 func doShutdown(action string) {
-	runInit("/etc/shutdown.d")
 	_ = unix.Kill(-1, unix.SIGTERM)
 	time.Sleep(5 * time.Second)
 	_ = unix.Kill(-1, unix.SIGKILL)
@@ -427,26 +393,12 @@ func main() {
 		}
 		doShutdown(action)
 	}
-	// see if we are on a real system or in userspace
-	// assume in userspace if /proc already mounted
-	userspace := exists("/proc/self")
 
-	if userspace {
-		subreaper()
-	} else {
-		doMounts()
-		doHotplug()
-		doClock()
-		doLoopback()
-	}
-
+	doMounts()
+	doHotplug()
+	doClock()
+	doLoopback()
 	doLimits()
 	doHostname()
 	doResolvConf()
-
-	runInit("/etc/init.d")
-
-	if userspace {
-		doReap()
-	}
 }
